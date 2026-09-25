@@ -1,0 +1,22 @@
+# Dataset TSV files (do not upload multi-GB datasets to GitHub)
+dataset/train/*.tsv
+dataset/test/*.tsv
+dataset/**/*.tsv
+
+# Submission zips & output files
+*.zip
+output/*.tsv
+
+# Python cache & environment
+__pycache__/
+*.pyc
+.pytest_cache/
+.venv/
+venv/
+env/
+
+# IDE / OS files
+.DS_Store
+.idea/
+.vscode/
+*.log
