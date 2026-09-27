@@ -1,11 +1,12 @@
 """
 ML model training & evaluation module for Business Entity Resolution Challenge.
 Supports threshold tuning and evaluation using F_0.5 metric.
+Uses GradientBoostingClassifier for higher accuracy on entity resolution.
 """
 
 import numpy as np
 import pandas as pd
-from sklearn.ensemble import RandomForestClassifier
+from sklearn.ensemble import GradientBoostingClassifier, RandomForestClassifier
 from sklearn.metrics import precision_score, recall_score, fbeta_score
 from typing import Tuple, Dict, Any
 
@@ -21,12 +22,18 @@ def calculate_f_05(precision: float, recall: float) -> float:
 class EntityResolutionModel:
     """Classifier model for predicting record matches between entity pairs."""
 
-    def __init__(self, n_estimators: int = 100, random_state: int = 42):
-        self.clf = RandomForestClassifier(
+    def __init__(self, n_estimators: int = 300, random_state: int = 42):
+        # GradientBoosting outperforms RF for entity resolution:
+        # it builds trees sequentially correcting previous errors,
+        # giving better calibrated probabilities and sharper decision boundaries
+        self.clf = GradientBoostingClassifier(
             n_estimators=n_estimators,
-            max_depth=12,
-            random_state=random_state,
-            n_jobs=-1
+            learning_rate=0.1,
+            max_depth=5,
+            min_samples_leaf=10,
+            subsample=0.8,
+            max_features='sqrt',
+            random_state=random_state
         )
         self.best_threshold = 0.5
 
@@ -44,19 +51,25 @@ class EntityResolutionModel:
         best_f05 = -1.0
         best_thresh = 0.5
 
-        for thresh in np.arange(0.1, 0.9, 0.02):
+        # Fine-grained search from 0.05 to 0.95
+        for thresh in np.arange(0.05, 0.96, 0.01):
             preds = (probas >= thresh).astype(int)
             prec = precision_score(y_val, preds, zero_division=0)
             rec = recall_score(y_val, preds, zero_division=0)
             f05 = calculate_f_05(prec, rec)
-            
+
             if f05 > best_f05:
                 best_f05 = f05
                 best_thresh = thresh
 
         self.best_threshold = best_thresh
-        print(f"Optimal Threshold: {best_thresh:.2f} with F_0.5 Score: {best_f05:.4f}")
-        return best_thresh
+
+        # Also print what precision/recall look like at this threshold
+        preds_best = (probas >= best_thresh).astype(int)
+        prec_best = precision_score(y_val, preds_best, zero_division=0)
+        rec_best = recall_score(y_val, preds_best, zero_division=0)
+        print(f"Optimal Threshold: {best_thresh:.2f} | Val F_0.5: {best_f05:.4f} | Precision: {prec_best:.4f} | Recall: {rec_best:.4f}")
+        return float(best_thresh)
 
     def predict(self, X: pd.DataFrame, threshold: float = None) -> np.ndarray:
         """Predict binary match labels using specified or tuned threshold."""

@@ -63,7 +63,7 @@ def stream_candidates_index(test_dir: str, country: str, nrows: int = None) -> T
                     c_addr = normalize_address(parts[2])
                     cand_lookup[c_id] = (c_name, c_addr, country_lower)
                     for k in extract_blocking_keys(c_name, c_addr):
-                        if len(index[k]) < 500:
+                        if len(index[k]) < 2000:
                             index[k].append(c_id)
                     count_source += 1
                     if nrows is not None and count_source >= nrows:
@@ -75,7 +75,7 @@ def run_pipeline(
     test_dir: str = "dataset/test",
     output_dir: str = "output",
     model_path: str = "models/er_model.pkl",
-    top_k_candidates: int = 12,
+    top_k_candidates: int = 20,
     batch_size: int = 10000,
     nrows: int = None
 ):
@@ -97,7 +97,7 @@ def run_pipeline(
 
     # 1. Load trained model artifact
     clf = None
-    best_threshold = 0.80
+    best_threshold = 0.50
     feat_names = None
     if os.path.exists(model_path):
         print(f"Loading trained model from {model_path}...")

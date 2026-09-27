@@ -17,6 +17,26 @@ def jaccard_similarity(s1: str, s2: str) -> float:
     return len(set1 & set2) / len(set1 | set2)
 
 
+def _name_len(s: str) -> int:
+    return len(s) if s else 0
+
+
+def _token_overlap_count(s1: str, s2: str) -> int:
+    """Number of shared tokens (absolute count, not ratio)."""
+    set1, set2 = set(s1.split()), set(s2.split())
+    return len(set1 & set2)
+
+
+def _digit_match(s1: str, s2: str) -> float:
+    """Fraction of digits from s1 that appear in s2 (for address/postal codes)."""
+    import re
+    d1 = set(re.findall(r'\d{3,}', s1))
+    d2 = set(re.findall(r'\d{3,}', s2))
+    if not d1:
+        return 0.5  # no info
+    return len(d1 & d2) / len(d1)
+
+
 def compute_pair_features(row: pd.Series) -> Dict[str, float]:
     """
     Compute fine-grained similarity features for a pair of records.
@@ -48,6 +68,12 @@ def compute_pair_features(row: pd.Series) -> Dict[str, float]:
     # Country match
     country_match = 1.0 if (country1 == country2 and country1 != '') else 0.0
 
+    # Extra features
+    name_token_overlap = float(_token_overlap_count(name1, name2))
+    addr_digit_match = _digit_match(addr1, addr2)
+    name_len_ratio = min(_name_len(name1), _name_len(name2)) / max(_name_len(name1), _name_len(name2), 1)
+    name_wratio = fuzz.WRatio(name1, name2) / 100.0
+
     return {
         'name_ratio': name_ratio,
         'name_partial': name_partial,
@@ -62,16 +88,22 @@ def compute_pair_features(row: pd.Series) -> Dict[str, float]:
         'addr_jaccard': addr_jaccard,
         'name_len_diff': float(name_len_diff),
         'addr_len_diff': float(addr_len_diff),
-        'country_match': country_match
+        'country_match': country_match,
+        # --- new features ---
+        'name_token_overlap': name_token_overlap,
+        'addr_digit_match': addr_digit_match,
+        'name_len_ratio': name_len_ratio,
+        'name_wratio': name_wratio,
     }
-
 
 
 def compute_pair_features_fast(name1: str, name2: str, addr1: str, addr2: str, country1: str, country2: str) -> list:
     """
     Direct ultra-fast C-speed feature extraction avoiding pandas Series/dict overhead.
-    Returns 14-dimensional feature vector in exact model column order.
+    Returns 18-dimensional feature vector in exact model column order.
     """
+    import re
+
     nr = fuzz.ratio(name1, name2) / 100.0
     np_ = fuzz.partial_ratio(name1, name2) / 100.0
     nts = fuzz.token_sort_ratio(name1, name2) / 100.0
@@ -93,7 +125,21 @@ def compute_pair_features_fast(name1: str, name2: str, addr1: str, addr2: str, c
     ald = float(abs(len(addr1) - len(addr2)))
     cm = 1.0 if country1 == country2 and country1 != '' else 0.0
 
-    return [nr, np_, nts, nte, nj, ne, ar, ap, ats, ate, aj, nld, ald, cm]
+    # --- new features ---
+    nto = float(len(w1 & w2))  # token overlap count
+
+    d1 = set(re.findall(r'\d{3,}', addr1))
+    d2 = set(re.findall(r'\d{3,}', addr2))
+    adm = len(d1 & d2) / len(d1) if d1 else 0.5
+
+    n1_len = len(name1)
+    n2_len = len(name2)
+    nlr = min(n1_len, n2_len) / max(n1_len, n2_len, 1)
+
+    nwr = fuzz.WRatio(name1, name2) / 100.0
+
+    return [nr, np_, nts, nte, nj, ne, ar, ap, ats, ate, aj, nld, ald, cm,
+            nto, adm, nlr, nwr]
 
 
 def extract_features_df(pairs_df: pd.DataFrame) -> pd.DataFrame:
@@ -102,4 +148,3 @@ def extract_features_df(pairs_df: pd.DataFrame) -> pd.DataFrame:
     """
     feature_rows = pairs_df.apply(compute_pair_features, axis=1)
     return pd.DataFrame(list(feature_rows))
-

@@ -12,31 +12,60 @@ import pandas as pd
 
 STOPWORDS = {
     'company', 'limited', 'private', 'pvt', 'ltd', 'inc', 'corp', 'llc', 'llp',
-    'the', 'and', 'services', 'enterprises', 'store', 'shop', 'india', 'solutions'
+    'the', 'and', 'services', 'enterprises', 'store', 'shop', 'india', 'solutions',
+    'group', 'international', 'global', 'trading', 'industries', 'management',
+    'tech', 'technologies', 'systems', 'network', 'networks', 'business',
+    'dba', 'co', 'of', 'de', 'la', 'le', 'les', 'du', 'des', 'et',
 }
-RE_NUMS = re.compile(r'\b\d{4,6}\b')
+
+RE_NUMS = re.compile(r'\b\d{3,7}\b')
+RE_ALPHA = re.compile(r'[a-z]{3,}')
+
+
+def _sig_tokens(text: str) -> List[str]:
+    """Extract significant (non-stopword, length>=3) tokens from text."""
+    return [t for t in text.split() if len(t) >= 3 and t not in STOPWORDS]
 
 
 def extract_blocking_keys(clean_name: str, clean_address: str) -> List[str]:
     """
     Generate multiple high-recall blocking keys per entity:
-    1. First 4 characters of normalized business name
-    2. Primary significant name tokens (length >= 4, non-stopword)
-    3. Postal/PIN/house numbers extracted from address
+    1. First 4 characters of normalized business name (prefix key)
+    2. First 5 characters (longer prefix)
+    3. Primary significant name tokens (length >= 3, non-stopword)
+    4. Token bigrams from name (for multi-word names)
+    5. Address number patterns (postal codes, house numbers)
+    6. First significant address token
     """
     keys = []
+
+    # --- Name prefix keys (multiple lengths) ---
     if len(clean_name) >= 3:
+        keys.append('p3_' + clean_name[:3])
+    if len(clean_name) >= 4:
         keys.append('p4_' + clean_name[:4])
+    if len(clean_name) >= 5:
+        keys.append('p5_' + clean_name[:5])
 
-    tokens = clean_name.split()
-    for t in tokens:
-        if len(t) >= 4 and t not in STOPWORDS:
-            keys.append('w_' + t)
-            if len(keys) >= 4:
-                break
+    # --- Significant token keys (up to 5 tokens) ---
+    tokens = _sig_tokens(clean_name)
+    for t in tokens[:5]:
+        keys.append('w_' + t)
 
-    for n in RE_NUMS.findall(clean_address)[:2]:
+    # --- Token bigram keys (adjacent significant token pairs) ---
+    for i in range(len(tokens) - 1):
+        bigram = tokens[i] + '_' + tokens[i + 1]
+        if len(bigram) <= 30:  # avoid absurdly long keys
+            keys.append('bg_' + bigram)
+
+    # --- Address number keys (postal codes, ZIP, PIN) ---
+    for n in RE_NUMS.findall(clean_address)[:3]:
         keys.append('num_' + n)
+
+    # --- First significant address token key ---
+    addr_tokens = _sig_tokens(clean_address)
+    if addr_tokens:
+        keys.append('adr_' + addr_tokens[0])
 
     return keys
 
@@ -52,14 +81,14 @@ def generate_candidates_fast(
     Runs in linear time and eliminates ArrayMemoryError / dense matrix allocation completely.
     """
     candidates_dict = {s1_id: [] for s1_id in df_s1['entity_id']}
-    
+
     # Partition by country
     countries = df_s1['clean_country'].unique()
-    
+
     for country in countries:
         s1_country = df_s1[df_s1['clean_country'] == country]
         cand_country = df_candidates[df_candidates['clean_country'] == country]
-        
+
         if s1_country.empty or cand_country.empty:
             continue
 
