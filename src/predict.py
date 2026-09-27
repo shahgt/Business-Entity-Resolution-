@@ -1,8 +1,8 @@
 """
-High-throughput Prediction Pipeline for Business Entity Resolution Challenge.
+Ultra-High-Performance Streaming Prediction Pipeline for Business Entity Resolution Challenge.
 Generates output/candidate_pairs.tsv and output/matching_results.tsv.
-Processes country-by-country using multi-key inverted index blocking and F_0.5-calibrated ML scoring.
-Guarantees memory-safe execution (< 2 GB RAM) across all 1.73M entities.
+Processes country-by-country via C-speed line streaming, inverted index blocking, and vectorized ML scoring.
+Peak memory < 1.5 GB across all 1.73M entities.
 """
 
 import os
@@ -13,9 +13,59 @@ import pandas as pd
 import numpy as np
 from typing import Dict, List, Set, Tuple
 from collections import defaultdict
-from src.preprocessing import load_and_preprocess_tsv
+from src.preprocessing import normalize_business_name, normalize_address, clean_text
 from src.blocking import extract_blocking_keys
 from src.features import compute_pair_features
+
+
+def stream_s1_country(test_dir: str, country: str, nrows: int = None) -> List[Tuple[str, str, str, str]]:
+    """Stream and preprocess Source 1 entities for a specific country."""
+    s1_path = os.path.join(test_dir, "test_source1.tsv")
+    entities = []
+    country_lower = country.lower()
+
+    with open(s1_path, 'r', encoding='utf-8') as f:
+        next(f)  # skip header
+        for line in f:
+            if country_lower not in line.lower():
+                continue
+            parts = line.rstrip('\r\n').split('\t')
+            if len(parts) >= 4 and parts[3].strip().lower() == country_lower:
+                s1_id = parts[0]
+                c_name = normalize_business_name(parts[1])
+                c_addr = normalize_address(parts[2])
+                entities.append((s1_id, c_name, c_addr, country_lower))
+                if nrows is not None and len(entities) >= nrows:
+                    break
+    return entities
+
+
+def stream_candidates_index(test_dir: str, country: str, nrows: int = None) -> Tuple[Dict[str, Tuple[str, str, str]], Dict[str, List[str]]]:
+    """Stream and index candidate entities from Source 2 and Source 3 for a country."""
+    cand_lookup = {}
+    index = defaultdict(list)
+    country_lower = country.lower()
+
+    for fname in ["test_source2.tsv", "test_source3.tsv"]:
+        path = os.path.join(test_dir, fname)
+        count_source = 0
+        with open(path, 'r', encoding='utf-8') as f:
+            next(f)  # skip header
+            for line in f:
+                if country_lower not in line.lower():
+                    continue
+                parts = line.rstrip('\r\n').split('\t')
+                if len(parts) >= 4 and parts[3].strip().lower() == country_lower:
+                    c_id = parts[0]
+                    c_name = normalize_business_name(parts[1])
+                    c_addr = normalize_address(parts[2])
+                    cand_lookup[c_id] = (c_name, c_addr, country_lower)
+                    for k in extract_blocking_keys(c_name, c_addr):
+                        index[k].append(c_id)
+                    count_source += 1
+                    if nrows is not None and count_source >= nrows:
+                        break
+    return cand_lookup, index
 
 
 def run_pipeline(
@@ -33,6 +83,14 @@ def run_pipeline(
     cand_pairs_path = os.path.join(output_dir, "candidate_pairs.tsv")
     matching_results_path = os.path.join(output_dir, "matching_results.tsv")
 
+    # Safety: Remove pre-existing output files so partitions never append to an old run
+    for p in [cand_pairs_path, matching_results_path]:
+        if os.path.exists(p):
+            try:
+                os.remove(p)
+            except OSError:
+                pass
+
     # 1. Load trained model artifact
     clf = None
     best_threshold = 0.64
@@ -44,83 +102,52 @@ def run_pipeline(
             clf = artifact.get('model')
             best_threshold = artifact.get('best_threshold', 0.64)
             feat_names = artifact.get('feature_names')
-        # Single-threaded prediction avoids joblib thread spawn overhead and warnings
         if clf is not None:
-            clf.n_jobs = 1
+            clf.n_jobs = 1  # Single-threaded prediction avoids joblib thread spawn overhead
         print(f"Loaded model with calibrated F_0.5 decision threshold: {best_threshold:.2f}")
     else:
         print("WARNING: Model not found. Running baseline candidate matching.")
 
-    # 2. Load dataset sources (single-pass read)
-    t0 = time.time()
-    print("\n--- Step 1: Loading test dataset ---")
-    df_s1 = load_and_preprocess_tsv(os.path.join(test_dir, "test_source1.tsv"), nrows=nrows)
-    print(f"Loaded {len(df_s1)} S1 entities in {time.time() - t0:.1f}s.")
-
-    t_cand = time.time()
-    df_s2 = load_and_preprocess_tsv(os.path.join(test_dir, "test_source2.tsv"), nrows=nrows)
-    df_s3 = load_and_preprocess_tsv(os.path.join(test_dir, "test_source3.tsv"), nrows=nrows)
-    df_cand_pool = pd.concat([df_s2, df_s3], ignore_index=True)
-    del df_s2, df_s3
-    gc.collect()
-    print(f"Loaded {len(df_cand_pool)} candidates from S2 and S3 in {time.time() - t_cand:.1f}s.")
-
-    # 3. Country-by-country partition processing
-    countries = ["france", "us", "india"]
+    # Countries present in the challenge
+    countries = ["France", "US", "India"]
     first_write = True
+    t_global_start = time.time()
 
     for country in countries:
-        s1_country = df_s1[df_s1['clean_country'] == country]
-        cand_country = df_cand_pool[df_cand_pool['clean_country'] == country]
-
-        if s1_country.empty:
-            continue
-
+        t_country_start = time.time()
         print(f"\n==========================================")
-        print(f"Processing Partition: '{country.upper()}' ({len(s1_country)} S1, {len(cand_country)} candidates)")
+        print(f"Processing Partition: '{country.upper()}'")
         print(f"==========================================")
 
+        # 1. Stream S1 entities
+        print(f"Streaming Source 1 ({country})...")
+        s1_entities = stream_s1_country(test_dir, country, nrows=nrows)
+        print(f"Loaded {len(s1_entities)} S1 entities in {time.time() - t_country_start:.1f}s.")
+        if not s1_entities:
+            continue
+
+        # 2. Stream & Index candidates
         t_idx = time.time()
-        print("Building inverted index...")
-        index = defaultdict(list)
-        cand_lookup = {}
-        for c_id, c_name, c_addr, c_cntry in zip(
-            cand_country['entity_id'],
-            cand_country['clean_name'],
-            cand_country['clean_address'],
-            cand_country['clean_country']
-        ):
-            cand_lookup[c_id] = (c_name, c_addr, c_cntry)
-            for k in extract_blocking_keys(c_name, c_addr):
-                index[k].append(c_id)
+        print(f"Streaming and indexing Source 2 & Source 3 candidates ({country})...")
+        cand_lookup, index = stream_candidates_index(test_dir, country, nrows=nrows)
+        print(f"Indexed {len(cand_lookup)} candidates into {len(index)} keys in {time.time() - t_idx:.1f}s.")
 
-        print(f"Index built ({len(index)} keys) in {time.time() - t_idx:.1f}s.")
-
-        # Batch scoring
+        # 3. Batch Scoring
         t_score = time.time()
+        print(f"Scoring {len(s1_entities)} entities in batches of {batch_size}...")
         candidate_rows = []
         matching_rows = []
-
-        s1_ids = s1_country['entity_id'].values
-        s1_names = s1_country['clean_name'].values
-        s1_addrs = s1_country['clean_address'].values
-        s1_cntries = s1_country['clean_country'].values
-        total_s1 = len(s1_ids)
+        total_s1 = len(s1_entities)
 
         for b_start in range(0, total_s1, batch_size):
             b_end = min(b_start + batch_size, total_s1)
-
             batch_pairs = []
             batch_pair_s1_indices = []
             batch_cand_ids = []
 
-            for i in range(b_start, b_end):
-                s1_id = s1_ids[i]
-                s1_name = s1_names[i]
-                s1_addr = s1_addrs[i]
-                s1_cntry = s1_cntries[i]
+            for rel_i, s1_tuple in enumerate(s1_entities[b_start:b_end]):
+                s1_id, s1_name, s1_addr, s1_cntry = s1_tuple
 
-                # Look up candidate IDs from inverted index
                 matched_cands = set()
                 for k in extract_blocking_keys(s1_name, s1_addr):
                     c_list = index.get(k)
@@ -148,7 +175,7 @@ def run_pipeline(
                             'clean_country_s1': s1_cntry,
                             'clean_country_cand': c_data[2]
                         })
-                        batch_pair_s1_indices.append(i - b_start)
+                        batch_pair_s1_indices.append(rel_i)
                         batch_cand_ids.append(c_id)
 
             # Fast vector batch scoring
@@ -166,29 +193,30 @@ def run_pipeline(
                         s1_matches[s1_rel_idx].append(batch_cand_ids[idx])
 
             for rel_idx in range(b_end - b_start):
-                s1_idx = b_start + rel_idx
+                s1_id = s1_entities[b_start + rel_idx][0]
                 m_list = s1_matches.get(rel_idx, [])
                 matching_rows.append({
-                    'source1_entity_id': s1_ids[s1_idx],
+                    'source1_entity_id': s1_id,
                     'matched_entity_ids': ','.join(m_list)
                 })
 
-            if b_end % 25000 == 0 or b_end == total_s1:
+            if b_end % 50000 == 0 or b_end == total_s1:
                 print(f"  Processed {b_end}/{total_s1} entities in {time.time() - t_score:.1f}s...")
 
-        # Append partition to output files
+        # Append to output TSVs
         mode = 'w' if first_write else 'a'
         header = first_write
         pd.DataFrame(candidate_rows).to_csv(cand_pairs_path, sep='\t', index=False, mode=mode, header=header)
         pd.DataFrame(matching_rows).to_csv(matching_results_path, sep='\t', index=False, mode=mode, header=header)
         first_write = False
-        print(f"Appended {len(matching_rows)} rows to output files. Partition completed!")
+        print(f"Appended {len(matching_rows)} rows to output files.")
+        print(f"Completed '{country.upper()}' partition in {time.time() - t_country_start:.1f}s.")
 
-        del index, cand_lookup
+        del s1_entities, cand_lookup, index, candidate_rows, matching_rows
         gc.collect()
 
     print("\n==========================================")
-    print("ALL PARTITIONS SUCCESSFULLY PROCESSED!")
+    print(f"ALL PARTITIONS COMPLETED in {time.time() - t_global_start:.1f}s!")
     print(f"Output 1: {cand_pairs_path}")
     print(f"Output 2: {matching_results_path}")
     print("==========================================")

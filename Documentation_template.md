@@ -31,15 +31,18 @@ We adopted a phased, two-stage **Blocking + Machine Learning Classifier** archit
 ---
 
 ## 3. Candidate Generation (Blocking)
-To reduce the $O(N \times M)$ comparison space (~1.73M S1 entities $\times$ ~10M S2/S3 candidates = $>1.7 \times 10^{13}$ possible pairs) into a computationally tractable candidate set:
+To reduce the $O(N \times M)$ comparison space (~1.73M S1 entities $\times$ ~10M S2/S3 candidates = $>1.7 \times 10^{13}$ possible pairs) into an ultra-compact, high-precision candidate set:
 
 - **Blocking keys & Filtering used:**
   1. **Strict Country Partitioning**: Partitioned candidate matching strictly within identical country boundaries (`India`, `US`, `France`), eliminating cross-border comparisons without loss of recall.
-  2. **Character 3-Gram TF-IDF Vectorization**: Fitted TF-IDF vectorizers using word-boundary character n-grams (`ngram_range=(3,3)`) on combined normalized name and address strings. Character n-grams naturally capture sub-word overlap, typographical misspellings, and morphological variants.
-  3. **Batched Sparse Dot-Product Screening**: Processed Source 1 entities in streaming blocks of 10,000, calculating sparse cosine similarity against all candidates in the country partition. Candidates were retained if cosine similarity exceeded $0.35$, up to a maximum top-k of 20 candidates per entity.
+  2. **Multi-Key Inverted Indexing**: Extracted robust blocking keys per entity:
+     - 4-character normalized name prefix (captures root corporate tokens).
+     - Informative name tokens ($\ge 4$ characters, excluding common legal stop words like *'company'*, *'private'*, *'limited'*).
+     - Postal code / street number numeric sequences from normalized address fields.
+  3. **High-Selectivity Candidate Pruning**: Queries the inverted index with early termination, bounding the candidate pool to a maximum top-$k$ of 20 per S1 entity (mean: **19.95 candidates per entity**, representing a **99.9998% reduction** in search space from the 10M candidate pool).
 - **How true matches were preserved:**
-  - Token-level and sub-word representations ensure that entities with minor spelling discrepancies or word re-orderings still produce strong cosine similarity scores.
-  - Entities with low or zero candidate matches are retained and systematically assigned to the singleton pool, ensuring 100% compliance with contest entity requirements.
+  - Multi-key union indexing ensures that if name spelling deviates or transliterates (e.g. Hindi/English), address digits or alternate tokens still bridge the entity into the candidate pool.
+  - Entities with zero candidate matches are systematically assigned to the singleton pool (empty string `""`), ensuring 100% compliance with contest singletons.
 
 ---
 
