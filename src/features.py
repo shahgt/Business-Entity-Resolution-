@@ -9,6 +9,14 @@ import numpy as np
 from rapidfuzz import fuzz
 
 
+def jaccard_similarity(s1: str, s2: str) -> float:
+    """Compute token Jaccard similarity."""
+    set1, set2 = set(s1.split()), set(s2.split())
+    if not set1 or not set2:
+        return 0.0
+    return len(set1 & set2) / len(set1 | set2)
+
+
 def compute_pair_features(row: pd.Series) -> Dict[str, float]:
     """
     Compute fine-grained similarity features for a pair of records.
@@ -23,12 +31,15 @@ def compute_pair_features(row: pd.Series) -> Dict[str, float]:
     name_partial = fuzz.partial_ratio(name1, name2) / 100.0
     name_token_sort = fuzz.token_sort_ratio(name1, name2) / 100.0
     name_token_set = fuzz.token_set_ratio(name1, name2) / 100.0
+    name_jaccard = jaccard_similarity(name1, name2)
+    name_exact = 1.0 if (name1 == name2 and name1 != '') else 0.0
 
     # Address similarities
     addr_ratio = fuzz.ratio(addr1, addr2) / 100.0
     addr_partial = fuzz.partial_ratio(addr1, addr2) / 100.0
     addr_token_sort = fuzz.token_sort_ratio(addr1, addr2) / 100.0
     addr_token_set = fuzz.token_set_ratio(addr1, addr2) / 100.0
+    addr_jaccard = jaccard_similarity(addr1, addr2)
 
     # Length features
     name_len_diff = abs(len(name1) - len(name2))
@@ -42,14 +53,18 @@ def compute_pair_features(row: pd.Series) -> Dict[str, float]:
         'name_partial': name_partial,
         'name_token_sort': name_token_sort,
         'name_token_set': name_token_set,
+        'name_jaccard': name_jaccard,
+        'name_exact': name_exact,
         'addr_ratio': addr_ratio,
         'addr_partial': addr_partial,
         'addr_token_sort': addr_token_sort,
         'addr_token_set': addr_token_set,
+        'addr_jaccard': addr_jaccard,
         'name_len_diff': float(name_len_diff),
         'addr_len_diff': float(addr_len_diff),
         'country_match': country_match
     }
+
 
 
 def extract_features_df(pairs_df: pd.DataFrame) -> pd.DataFrame:

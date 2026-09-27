@@ -40,6 +40,7 @@ def build_submission_zip(team_name: str = "Team_Solution", output_zip_path: str 
         ("src/blocking.py", "code/business_entity_resolution/src/blocking.py"),
         ("src/features.py", "code/business_entity_resolution/src/features.py"),
         ("src/model.py", "code/business_entity_resolution/src/model.py"),
+        ("src/train.py", "code/business_entity_resolution/src/train.py"),
         ("src/predict.py", "code/business_entity_resolution/src/predict.py"),
         ("README.md", "code/business_entity_resolution/README.md"),
         ("requirements.txt", "code/business_entity_resolution/requirements.txt"),

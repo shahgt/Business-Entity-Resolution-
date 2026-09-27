@@ -32,37 +32,47 @@ ADDRESS_REPLACEMENTS = [
 ]
 
 
+# Precompile regex replacements for high throughput
+COMPILED_NAME_REPLACEMENTS = [
+    (re.compile(pattern, re.IGNORECASE), replacement) for pattern, replacement in NAME_REPLACEMENTS
+]
+COMPILED_ADDRESS_REPLACEMENTS = [
+    (re.compile(pattern, re.IGNORECASE), replacement) for pattern, replacement in ADDRESS_REPLACEMENTS
+]
+RE_NON_WORD = re.compile(r'[^\w\s]')
+RE_WHITESPACE = re.compile(r'\s+')
+
+
 def clean_text(text: str) -> str:
-    """Basic text normalization."""
-    if not isinstance(text, str) or pd.isna(text):
+    """Fast text normalization."""
+    if not isinstance(text, str) or not text:
         return ""
-    text = text.lower().strip()
-    text = re.sub(r'[^\w\s]', ' ', text)
-    text = re.sub(r'\s+', ' ', text)
-    return text.strip()
+    text = RE_NON_WORD.sub(' ', text.lower().strip())
+    return RE_WHITESPACE.sub(' ', text).strip()
 
 
 def normalize_business_name(name: str) -> str:
     """Normalize business name by cleaning punctuation and standardizing common suffixes."""
     cleaned = clean_text(name)
-    for pattern, replacement in NAME_REPLACEMENTS:
-        cleaned = re.sub(pattern, replacement, cleaned)
-    return re.sub(r'\s+', ' ', cleaned).strip()
+    for pattern, replacement in COMPILED_NAME_REPLACEMENTS:
+        cleaned = pattern.sub(replacement, cleaned)
+    return RE_WHITESPACE.sub(' ', cleaned).strip()
 
 
 def normalize_address(address: str) -> str:
     """Normalize business address by standardizing street/suite abbreviations."""
     cleaned = clean_text(address)
-    for pattern, replacement in ADDRESS_REPLACEMENTS:
-        cleaned = re.sub(pattern, replacement, cleaned)
-    return re.sub(r'\s+', ' ', cleaned).strip()
+    for pattern, replacement in COMPILED_ADDRESS_REPLACEMENTS:
+        cleaned = pattern.sub(replacement, cleaned)
+    return RE_WHITESPACE.sub(' ', cleaned).strip()
 
 
-def load_and_preprocess_tsv(file_path: str) -> pd.DataFrame:
+def load_and_preprocess_tsv(file_path: str, nrows: int = None) -> pd.DataFrame:
     """
     Load TSV dataset file with tab separator and add cleaned feature columns.
+    Supports nrows for fast debugging and sampling.
     """
-    df = pd.read_csv(file_path, sep='\t', dtype=str)
+    df = pd.read_csv(file_path, sep='\t', dtype=str, nrows=nrows)
     
     # Fill missing string values
     for col in ['business_name', 'business_address', 'country']:
@@ -77,3 +87,4 @@ def load_and_preprocess_tsv(file_path: str) -> pd.DataFrame:
         df['clean_country'] = df['country'].apply(clean_text)
 
     return df
+
