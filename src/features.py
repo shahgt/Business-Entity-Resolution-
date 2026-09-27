@@ -67,9 +67,39 @@ def compute_pair_features(row: pd.Series) -> Dict[str, float]:
 
 
 
+def compute_pair_features_fast(name1: str, name2: str, addr1: str, addr2: str, country1: str, country2: str) -> list:
+    """
+    Direct ultra-fast C-speed feature extraction avoiding pandas Series/dict overhead.
+    Returns 14-dimensional feature vector in exact model column order.
+    """
+    nr = fuzz.ratio(name1, name2) / 100.0
+    np_ = fuzz.partial_ratio(name1, name2) / 100.0
+    nts = fuzz.token_sort_ratio(name1, name2) / 100.0
+    nte = fuzz.token_set_ratio(name1, name2) / 100.0
+
+    w1, w2 = set(name1.split()), set(name2.split())
+    nj = len(w1 & w2) / len(w1 | w2) if w1 and w2 else 0.0
+    ne = 1.0 if name1 == name2 and name1 != '' else 0.0
+
+    ar = fuzz.ratio(addr1, addr2) / 100.0 if addr1 and addr2 else 0.0
+    ap = fuzz.partial_ratio(addr1, addr2) / 100.0 if addr1 and addr2 else 0.0
+    ats = fuzz.token_sort_ratio(addr1, addr2) / 100.0 if addr1 and addr2 else 0.0
+    ate = fuzz.token_set_ratio(addr1, addr2) / 100.0 if addr1 and addr2 else 0.0
+
+    aw1, aw2 = set(addr1.split()), set(addr2.split())
+    aj = len(aw1 & aw2) / len(aw1 | aw2) if aw1 and aw2 else 0.0
+
+    nld = float(abs(len(name1) - len(name2)))
+    ald = float(abs(len(addr1) - len(addr2)))
+    cm = 1.0 if country1 == country2 and country1 != '' else 0.0
+
+    return [nr, np_, nts, nte, nj, ne, ar, ap, ats, ate, aj, nld, ald, cm]
+
+
 def extract_features_df(pairs_df: pd.DataFrame) -> pd.DataFrame:
     """
     Extract feature DataFrame from paired record rows.
     """
     feature_rows = pairs_df.apply(compute_pair_features, axis=1)
     return pd.DataFrame(list(feature_rows))
+

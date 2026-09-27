@@ -11,11 +11,13 @@ import pickle
 import time
 import pandas as pd
 import numpy as np
+import warnings
+warnings.filterwarnings('ignore')
 from typing import Dict, List, Set, Tuple
-from collections import defaultdict
+from collections import Counter, defaultdict
 from src.preprocessing import normalize_business_name, normalize_address, clean_text
 from src.blocking import extract_blocking_keys
-from src.features import compute_pair_features
+from src.features import compute_pair_features_fast
 
 
 def stream_s1_country(test_dir: str, country: str, nrows: int = None) -> List[Tuple[str, str, str, str]]:
@@ -61,7 +63,8 @@ def stream_candidates_index(test_dir: str, country: str, nrows: int = None) -> T
                     c_addr = normalize_address(parts[2])
                     cand_lookup[c_id] = (c_name, c_addr, country_lower)
                     for k in extract_blocking_keys(c_name, c_addr):
-                        index[k].append(c_id)
+                        if len(index[k]) < 500:
+                            index[k].append(c_id)
                     count_source += 1
                     if nrows is not None and count_source >= nrows:
                         break
@@ -72,12 +75,13 @@ def run_pipeline(
     test_dir: str = "dataset/test",
     output_dir: str = "output",
     model_path: str = "models/er_model.pkl",
-    top_k_candidates: int = 20,
-    batch_size: int = 5000,
+    top_k_candidates: int = 12,
+    batch_size: int = 10000,
     nrows: int = None
 ):
     """
     Run memory-safe, country-partitioned prediction pipeline across full test set.
+    Uses multi-key overlap ranking and C-speed vectorized feature scoring.
     """
     os.makedirs(output_dir, exist_ok=True)
     cand_pairs_path = os.path.join(output_dir, "candidate_pairs.tsv")
@@ -93,14 +97,14 @@ def run_pipeline(
 
     # 1. Load trained model artifact
     clf = None
-    best_threshold = 0.64
+    best_threshold = 0.80
     feat_names = None
     if os.path.exists(model_path):
         print(f"Loading trained model from {model_path}...")
         with open(model_path, 'rb') as f:
             artifact = pickle.load(f)
             clf = artifact.get('model')
-            best_threshold = artifact.get('best_threshold', 0.64)
+            best_threshold = artifact.get('best_threshold', 0.80)
             feat_names = artifact.get('feature_names')
         if clf is not None:
             clf.n_jobs = 1  # Single-threaded prediction avoids joblib thread spawn overhead
@@ -110,7 +114,8 @@ def run_pipeline(
 
     # Countries present in the challenge
     countries = ["France", "US", "India"]
-    first_write = True
+    candidate_map = {}
+    matching_map = {}
     t_global_start = time.time()
 
     for country in countries:
@@ -132,60 +137,52 @@ def run_pipeline(
         cand_lookup, index = stream_candidates_index(test_dir, country, nrows=nrows)
         print(f"Indexed {len(cand_lookup)} candidates into {len(index)} keys in {time.time() - t_idx:.1f}s.")
 
-        # 3. Batch Scoring
+        # 3. Batch Scoring with Hit-Counter Candidate Ranking
         t_score = time.time()
         print(f"Scoring {len(s1_entities)} entities in batches of {batch_size}...")
-        candidate_rows = []
-        matching_rows = []
         total_s1 = len(s1_entities)
 
         for b_start in range(0, total_s1, batch_size):
             b_end = min(b_start + batch_size, total_s1)
-            batch_pairs = []
+            batch_pair_data = []
             batch_pair_s1_indices = []
             batch_cand_ids = []
 
             for rel_i, s1_tuple in enumerate(s1_entities[b_start:b_end]):
                 s1_id, s1_name, s1_addr, s1_cntry = s1_tuple
 
-                matched_cands = set()
+                # Key hit counter: rank candidates by number of shared keys across all tokens/prefixes/numbers
+                counter = Counter()
                 for k in extract_blocking_keys(s1_name, s1_addr):
                     c_list = index.get(k)
                     if c_list:
-                        matched_cands.update(c_list)
-                        if len(matched_cands) >= top_k_candidates * 2:
-                            break
+                        for c_id in c_list:
+                            counter[c_id] += 1
 
-                candidate_list = list(matched_cands)[:top_k_candidates]
-                candidate_rows.append({
-                    'source1_entity_id': s1_id,
-                    'candidate_entity_ids': ','.join(candidate_list)
-                })
+                candidate_list = [c for c, _ in counter.most_common(top_k_candidates)]
+                candidate_map[s1_id] = ','.join(candidate_list)
 
                 if candidate_list and clf is not None:
                     for c_id in candidate_list:
                         c_data = cand_lookup.get(c_id)
                         if c_data is None:
                             continue
-                        batch_pairs.append({
-                            'clean_name_s1': s1_name,
-                            'clean_name_cand': c_data[0],
-                            'clean_address_s1': s1_addr,
-                            'clean_address_cand': c_data[1],
-                            'clean_country_s1': s1_cntry,
-                            'clean_country_cand': c_data[2]
-                        })
+                        batch_pair_data.append((
+                            s1_name, c_data[0],
+                            s1_addr, c_data[1],
+                            s1_cntry, c_data[2]
+                        ))
                         batch_pair_s1_indices.append(rel_i)
                         batch_cand_ids.append(c_id)
 
-            # Fast vector batch scoring
+            # Ultra-fast C-speed vector batch scoring
             s1_matches = defaultdict(list)
-            if batch_pairs and clf is not None:
-                feat_dicts = [compute_pair_features(pd.Series(bp)) for bp in batch_pairs]
-                X_batch = pd.DataFrame(feat_dicts)
-                if feat_names:
-                    X_batch = X_batch.reindex(columns=feat_names, fill_value=0.0)
-                probs = clf.predict_proba(X_batch)[:, 1]
+            if batch_pair_data and clf is not None:
+                feat_matrix = [
+                    compute_pair_features_fast(p[0], p[1], p[2], p[3], p[4], p[5])
+                    for p in batch_pair_data
+                ]
+                probs = clf.predict_proba(np.array(feat_matrix))[:, 1]
 
                 for idx, p in enumerate(probs):
                     if p >= best_threshold:
@@ -195,26 +192,38 @@ def run_pipeline(
             for rel_idx in range(b_end - b_start):
                 s1_id = s1_entities[b_start + rel_idx][0]
                 m_list = s1_matches.get(rel_idx, [])
-                matching_rows.append({
-                    'source1_entity_id': s1_id,
-                    'matched_entity_ids': ','.join(m_list)
-                })
+                matching_map[s1_id] = ','.join(m_list)
 
             if b_end % 50000 == 0 or b_end == total_s1:
                 print(f"  Processed {b_end}/{total_s1} entities in {time.time() - t_score:.1f}s...")
 
-        # Append to output TSVs
-        mode = 'w' if first_write else 'a'
-        header = first_write
-        pd.DataFrame(candidate_rows).to_csv(cand_pairs_path, sep='\t', index=False, mode=mode, header=header)
-        pd.DataFrame(matching_rows).to_csv(matching_results_path, sep='\t', index=False, mode=mode, header=header)
-        first_write = False
-        print(f"Appended {len(matching_rows)} rows to output files.")
         print(f"Completed '{country.upper()}' partition in {time.time() - t_country_start:.1f}s.")
-
-        del s1_entities, cand_lookup, index, candidate_rows, matching_rows
+        del s1_entities, cand_lookup, index
         gc.collect()
 
+    # Write output files strictly aligned to the exact test_source1.tsv order
+    print("\nWriting output files aligned to exact test_source1.tsv order...")
+    t_write = time.time()
+    s1_path = os.path.join(test_dir, "test_source1.tsv")
+    written_count = 0
+
+    with open(s1_path, 'r', encoding='utf-8') as fs1, \
+         open(cand_pairs_path, 'w', encoding='utf-8') as fc, \
+         open(matching_results_path, 'w', encoding='utf-8') as fm:
+        fc.write("source1_entity_id\tcandidate_entity_ids\n")
+        fm.write("source1_entity_id\tmatched_entity_ids\n")
+        next(fs1)  # skip header
+        for line in fs1:
+            if not line.strip():
+                continue
+            s1_id = line.split('\t', 1)[0].strip()
+            fc.write(f"{s1_id}\t{candidate_map.get(s1_id, '')}\n")
+            fm.write(f"{s1_id}\t{matching_map.get(s1_id, '')}\n")
+            written_count += 1
+            if nrows is not None and written_count >= nrows * len(countries):
+                break
+
+    print(f"Wrote {written_count} rows in {time.time() - t_write:.1f}s.")
     print("\n==========================================")
     print(f"ALL PARTITIONS COMPLETED in {time.time() - t_global_start:.1f}s!")
     print(f"Output 1: {cand_pairs_path}")

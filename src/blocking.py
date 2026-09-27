@@ -69,17 +69,17 @@ def generate_candidates_fast(
             for k in extract_blocking_keys(name, addr):
                 index[k].append(cand_id)
 
+        from collections import Counter
         print(f"Index built ({len(index)} unique keys). Querying {len(s1_country)} S1 entities...")
         for s1_id, name, addr in zip(s1_country['entity_id'], s1_country['clean_name'], s1_country['clean_address']):
-            matched = set()
+            counter = Counter()
             for k in extract_blocking_keys(name, addr):
                 c_list = index.get(k)
                 if c_list:
-                    matched.update(c_list)
-                    if len(matched) >= top_k * 2:
-                        break
-            if matched:
-                candidates_dict[s1_id] = list(matched)[:top_k]
+                    for c_id in c_list:
+                        counter[c_id] += 1
+            if counter:
+                candidates_dict[s1_id] = [c for c, _ in counter.most_common(top_k)]
 
     return candidates_dict
 
